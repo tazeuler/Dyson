@@ -1,0 +1,94 @@
+import numpy as np
+import pandas as pd
+from scipy.optimize import brentq
+
+class Bond:
+    def __init__(self, isin, face_value, issue_date, maturity_date, price=None, yield_to_maturity=None, coupon_rate=None, frequency=None, coupon_series=None, day_count_convention='30/360'):
+        self.isin = isin
+        self.face_value = face_value
+        self.issue_date = pd.to_datetime(issue_date)
+        self.maturity_date = pd.to_datetime(maturity_date)
+        self.price = price
+        self.yield_to_maturity = yield_to_maturity
+        self.coupon_rate = coupon_rate
+        self.frequency = frequency
+        self.coupon_series = coupon_series
+        self.day_count_convention = day_count_convention
+
+    def calculate_days(self, date1, date2):
+        if self.day_count_convention == 'Actual/Actual':
+            return (date2 - date1).days
+        elif self.day_count_convention == '30/360':
+            return 360 * (date2.year - date1.year) + 30 * (date2.month - date1.month) + min(30, date2.day) - min(30, date1.day)
+
+    def calculate_cash_flows(self):
+        if self.coupon_series is not None:
+            return self.coupon_series
+        else:
+            cash_flows = pd.Series([self.coupon_rate * self.face_value] * ((self.maturity_date.year - self.issue_date.year) + 1), 
+                                   index=pd.date_range(start=self.issue_date, end=self.maturity_date, freq=pd.DateOffset(years=1))
+                                  )
+            cash_flows.iloc[-1] += self.face_value  # Add face value to the last payment
+            return cash_flows
+
+    def calculate_price(self, yield_to_maturity):
+        cash_flows = self.calculate_cash_flows()
+        return np.sum([cf / (1 + yield_to_maturity)**(self.calculate_days(cash_flows.index[0], date) / 365) for date, cf in cash_flows.items()])
+
+    def calculate_yield_to_maturity(self):
+        def calculate_present_value(rate):
+            return np.sum([cf / (1 + rate)**(self.calculate_days(cash_flows.index[0], date) / 365) for date, cf in cash_flows.items()]) - self.price
+
+        cash_flows = self.calculate_cash_flows()
+        return brentq(calculate_present_value, 0.0001, 1)
+
+    def calculate_residual_maturity(self):
+        return (self.maturity_date - pd.Timestamp.now()).days / 365
+
+    def calculate_duration(self, yield_to_maturity):
+        cash_flows = self.calculate_cash_flows()
+        durations = [self.calculate_days(cash_flows.index[0], date) / 365 * cf / (1 + yield_to_maturity)**(self.calculate_days(cash_flows.index[0], date) / 365) for date, cf in cash_flows.items()]
+        return np.sum(durations) / self.calculate_price(yield_to_maturity)
+
+    def calculate_modified_duration(self, yield_to_maturity):
+        duration = self.calculate_duration(yield_to_maturity)
+        return duration / (1 + yield_to_maturity)
+
+    def calculate_convexity(self, yield_to_maturity):
+        cash_flows = self.calculate_cash_flows()
+        convexities = [self.calculate_days(cash_flows.index[0], date)**2 / 365**2 * cf / (1 + yield_to_maturity)**(self.calculate_days(cash_flows.index[0], date) / 365) for date, cf in cash_flows.items()]
+        return np.sum(convexities) / self.calculate_price(yield_to_maturity)
+
+    def calculate_z_spread(self, treasury_yield_curve):
+        def calculate_bond_value(z_spread):
+            return self.calculate_price(treasury_yield_curve + z_spread) - self.price
+
+        return brentq(calculate_bond_value, -1, 1)
+
+    def calculate_option_adjusted_spread(self, treasury_yield_curve, option_value):
+        def calculate_bond_value(oas):
+            return self.calculate_price(treasury_yield_curve + oas) - option_value
+
+        return brentq(calculate_bond_value, -1, 1)
+
+    def calculate_yield_to_worst(self, treasury_yield_curve):
+        cash_flows = self.calculate_cash_flows()
+        ytw = float('inf')
+
+        for date, cf in cash_flows.items():
+            if date > pd.Timestamp.now():
+                ytw = min(ytw, brentq(lambda y: self.calculate_price(y) - cf, -1, 1))
+
+        return ytw
+
+    def calculate_dv01(self, yield_change=0.0001):
+        price = self.calculate_price(self.yield_to_maturity)
+        price_down = self.calculate_price(self.yield_to_maturity - yield_change)
+        price_up = self.calculate_price(self.yield_to_maturity + yield_change)
+        return 0.5 * (price_down - price_up)
+
+# Example usage
+bond = Bond(isin='US1234567890', face_value=1000, issue_date='2022-01-01', maturity_date='2027-01-01', price=950, yield_to_maturity=0.05, coupon_rate=0.05, frequency=1, day_count_convention='Actual/Actual')
+
+dv01 = bond.calculate_dv01()
+print(f"DV01: {dv01}")
